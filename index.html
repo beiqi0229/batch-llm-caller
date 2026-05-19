@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM batch caller</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --border: #d7deea;
+      --text: #172033;
+      --muted: #5d6880;
+      --accent: #1f6feb;
+      --accent-hover: #1959bc;
+      --success: #1f8f58;
+      --shadow: 0 18px 40px rgba(23, 32, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #eef3fb 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 48px 20px 64px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    h1 {
+      margin: 0 0 24px;
+      font-size: 2rem;
+      line-height: 1.1;
+    }
+
+    .field {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      font-weight: 600;
+    }
+
+    textarea,
+    input[type="text"],
+    input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font: inherit;
+      color: inherit;
+      background: #fff;
+    }
+
+    textarea {
+      min-height: 140px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 28px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 20px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 120ms ease, opacity 120ms ease;
+    }
+
+    #runButton,
+    #downloadButton {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    #runButton:hover,
+    #downloadButton:hover {
+      background: var(--accent-hover);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .status,
+    .results {
+      margin-top: 24px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #fbfcff;
+      padding: 18px;
+    }
+
+    .status {
+      min-height: 88px;
+      white-space: pre-wrap;
+      color: var(--muted);
+    }
+
+    .results {
+      display: grid;
+      gap: 14px;
+    }
+
+    .result-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      background: #fff;
+    }
+
+    .result-item h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }
+
+    .result-block {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .result-block strong {
+      font-size: 0.95rem;
+    }
+
+    .result-block pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: inherit;
+      color: var(--text);
+    }
+
+    .hint {
+      margin: 0;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    .complete {
+      color: var(--success);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <h1>LLM batch caller</h1>
+
+      <div class="field">
+        <label for="systemPrompt">System prompt</label>
+        <textarea id="systemPrompt" placeholder="Enter the system prompt to use for every row."></textarea>
+      </div>
+
+      <div class="field">
+        <label for="fileInput">Prompt file</label>
+        <input id="fileInput" type="file" accept=".txt,.csv,text/plain,text/csv">
+        <p class="hint">One prompt per line. Empty lines are skipped.</p>
+      </div>
+
+      <div class="field">
+        <label for="modelInput">Model name</label>
+        <input id="modelInput" type="text" value="qwen3.5-0.8b">
+      </div>
+
+      <div class="actions">
+        <button id="runButton" type="button">Run</button>
+        <button id="downloadButton" type="button" hidden>Download CSV</button>
+      </div>
+
+      <div id="status" class="status">Ready.</div>
+      <div id="results" class="results">
+        <p class="hint">Results will appear here after processing starts.</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const endpoint = "http://localhost:1234/v1/chat/completions";
+    const requestTimeoutMs = 180000;
+
+    const systemPromptEl = document.getElementById("systemPrompt");
+    const fileInputEl = document.getElementById("fileInput");
+    const modelInputEl = document.getElementById("modelInput");
+    const runButtonEl = document.getElementById("runButton");
+    const downloadButtonEl = document.getElementById("downloadButton");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+
+    let batchResults = [];
+
+    function setStatus(message, isComplete) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("complete", Boolean(isComplete));
+    }
+
+    function escapeCsvField(value) {
+      const stringValue = String(value ?? "");
+      if (/[",\n\r]/.test(stringValue)) {
+        return "\"" + stringValue.replace(/"/g, "\"\"") + "\"";
+      }
+      return stringValue;
+    }
+
+    function buildCsv(rows) {
+      const header = ["row_number", "input", "response"];
+      const lines = [header.join(",")];
+      for (const row of rows) {
+        lines.push([
+          escapeCsvField(row.row_number),
+          escapeCsvField(row.input),
+          escapeCsvField(row.response)
+        ].join(","));
+      }
+      return lines.join("\r\n");
+    }
+
+    function renderResults(rows) {
+      resultsEl.innerHTML = "";
+
+      if (rows.length === 0) {
+        resultsEl.innerHTML = "<p class=\"hint\">No non-empty lines were found in the selected file.</p>";
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+
+      for (const row of rows) {
+        const item = document.createElement("article");
+        item.className = "result-item";
+
+        const title = document.createElement("h2");
+        title.textContent = `Row ${row.row_number}`;
+        item.appendChild(title);
+
+        const inputBlock = document.createElement("div");
+        inputBlock.className = "result-block";
+        inputBlock.innerHTML = "<strong>Input</strong>";
+        const inputText = document.createElement("pre");
+        inputText.textContent = row.input;
+        inputBlock.appendChild(inputText);
+        item.appendChild(inputBlock);
+
+        const responseBlock = document.createElement("div");
+        responseBlock.className = "result-block";
+        responseBlock.innerHTML = "<strong>Response</strong>";
+        const responseText = document.createElement("pre");
+        responseText.textContent = row.response;
+        responseBlock.appendChild(responseText);
+        item.appendChild(responseBlock);
+
+        fragment.appendChild(item);
+      }
+
+      resultsEl.appendChild(fragment);
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Failed to read the selected file."));
+        reader.readAsText(file);
+      });
+    }
+
+    async function callModel(model, systemPrompt, userPrompt) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
+
+      let response;
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt }
+            ]
+          })
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new Error(`Request timed out after ${requestTimeoutMs / 1000} seconds.`);
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
+      }
+
+      const data = await response.json();
+      const content = data && data.choices && data.choices[0] && data.choices[0].message
+        ? data.choices[0].message.content
+        : "";
+
+      if (typeof content === "string") {
+        return content;
+      }
+
+      if (Array.isArray(content)) {
+        return content.map((part) => part && typeof part.text === "string" ? part.text : "").join("");
+      }
+
+      return JSON.stringify(content ?? "");
+    }
+
+    async function handleRun() {
+      const file = fileInputEl.files[0];
+      if (!file) {
+        setStatus("Select a .txt or .csv file first.", false);
+        return;
+      }
+
+      const model = modelInputEl.value.trim() || "qwen3.5-0.8b";
+      const systemPrompt = systemPromptEl.value;
+
+      runButtonEl.disabled = true;
+      downloadButtonEl.hidden = true;
+      batchResults = [];
+      resultsEl.innerHTML = "<p class=\"hint\">Processing results will appear here row by row.</p>";
+      setStatus("Reading file...", false);
+
+      try {
+        const fileText = await readFileAsText(file);
+        const lines = fileText
+          .split(/\r?\n/)
+          .filter((line) => line.trim().length > 0);
+
+        if (lines.length === 0) {
+          setStatus("No non-empty lines found in the selected file.", false);
+          renderResults([]);
+          return;
+        }
+
+        for (let index = 0; index < lines.length; index += 1) {
+          const line = lines[index];
+          const rowNumber = index + 1;
+          setStatus(`Processing ${rowNumber} of ${lines.length}. Completed ${batchResults.length}. Waiting for LM Studio...`, false);
+
+          let responseText;
+          try {
+            responseText = await callModel(model, systemPrompt, line);
+          } catch (error) {
+            responseText = error instanceof Error ? error.message : String(error);
+          }
+
+          batchResults.push({
+            row_number: rowNumber,
+            input: line,
+            response: responseText
+          });
+
+          renderResults(batchResults);
+          setStatus(`Processed ${rowNumber} of ${lines.length}.`, false);
+        }
+
+        setStatus(`Completed ${batchResults.length} of ${lines.length} rows.`, true);
+        downloadButtonEl.hidden = false;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(message, false);
+      } finally {
+        runButtonEl.disabled = false;
+      }
+    }
+
+    function handleDownload() {
+      if (batchResults.length === 0) {
+        return;
+      }
+
+      const csv = buildCsv(batchResults);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "results.csv";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    runButtonEl.addEventListener("click", handleRun);
+    downloadButtonEl.addEventListener("click", handleDownload);
+  </script>
+</body>
+</html>
