@@ -185,7 +185,7 @@
 
       <div class="field">
         <label for="fileInput">Prompt file</label>
-        <input id="fileInput" type="file" accept=".txt,.csv,text/plain,text/csv">
+        <input id="fileInput" type="file" accept=".txt,.csv,.jpg,.jpeg,.png,text/plain,text/csv,image/jpeg,image/png">
         <p class="hint">One prompt per line. Empty lines are skipped.</p>
       </div>
 
@@ -201,7 +201,7 @@
 
       <div class="field">
         <label for="modelInput">Model name</label>
-        <input id="modelInput" type="text" value="qwen3.5-0.8b" placeholder="qwen3.5-0.8b (LM Studio), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter)">
+        <input id="modelInput" type="text" value="qwen3.5-0.8b">
       </div>
 
       <div class="actions">
@@ -218,6 +218,8 @@
 
   <script>
     const requestTimeoutMs = 180000;
+    const textModelPlaceholder = "qwen3.5-0.8b (LM Studio), gemini-2.5-flash (Google AI Studio), meta-llama/llama-3.3-70b-instruct:free (OpenRouter)";
+    const imageModelPlaceholder = "qwen2.5-vl-7b (LM Studio, if loaded), qwen/qwen2.5-vl-72b-instruct:free (OpenRouter)";
 
     const systemPromptEl = document.getElementById("systemPrompt");
     const fileInputEl = document.getElementById("fileInput");
@@ -230,6 +232,8 @@
     const resultsEl = document.getElementById("results");
 
     let batchResults = [];
+
+    modelInputEl.placeholder = textModelPlaceholder;
 
     function setStatus(message, isComplete) {
       statusEl.textContent = message;
@@ -306,7 +310,22 @@
       });
     }
 
-    async function callModel(apiUrl, apiKey, model, systemPrompt, userPrompt) {
+    function readFileAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Failed to read the selected image."));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function isImageFile(file) {
+      const imageTypes = ["image/jpeg", "image/png"];
+      const imageExtensions = /\.(jpe?g|png)$/i;
+      return imageTypes.includes(file.type) || imageExtensions.test(file.name);
+    }
+
+    async function sendChatRequest(apiUrl, apiKey, payload) {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
       const headers = {
@@ -323,13 +342,7 @@
           method: "POST",
           headers,
           signal: controller.signal,
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: userPrompt }
-            ]
-          })
+          body: JSON.stringify(payload)
         });
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
@@ -361,6 +374,56 @@
       return JSON.stringify(content ?? "");
     }
 
+    async function callModel(apiUrl, apiKey, model, systemPrompt, userPrompt) {
+      return sendChatRequest(apiUrl, apiKey, {
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      });
+    }
+
+    async function callImageModel(apiUrl, apiKey, model, userText, imageDataUrl) {
+      return sendChatRequest(apiUrl, apiKey, {
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: userText },
+              { type: "image_url", image_url: { url: imageDataUrl } }
+            ]
+          }
+        ]
+      });
+    }
+
+    async function processImageFile(file, apiUrl, apiKey, model, systemPrompt) {
+      const imagePrompt = systemPrompt.trim() || "Transcribe this image as accurately as you can.";
+
+      setStatus("Reading image...", false);
+      const imageDataUrl = await readFileAsDataUrl(file);
+      setStatus("Processing image. Waiting for API response...", false);
+
+      let responseText;
+      try {
+        responseText = await callImageModel(apiUrl, apiKey, model, imagePrompt, imageDataUrl);
+      } catch (error) {
+        responseText = error instanceof Error ? error.message : String(error);
+      }
+
+      batchResults.push({
+        row_number: 1,
+        input: file.name,
+        response: responseText
+      });
+
+      renderResults(batchResults);
+      setStatus("Completed 1 of 1 rows.", true);
+      downloadButtonEl.hidden = false;
+    }
+
     async function handleRun() {
       const file = fileInputEl.files[0];
       if (!file) {
@@ -380,6 +443,11 @@
       setStatus("Reading file...", false);
 
       try {
+        if (isImageFile(file)) {
+          await processImageFile(file, apiUrl, apiKey, model, systemPrompt);
+          return;
+        }
+
         const fileText = await readFileAsText(file);
         const lines = fileText
           .split(/\r?\n/)
@@ -440,6 +508,14 @@
       URL.revokeObjectURL(url);
     }
 
+    function handleFileChange() {
+      const file = fileInputEl.files[0];
+      modelInputEl.placeholder = file && isImageFile(file)
+        ? imageModelPlaceholder
+        : textModelPlaceholder;
+    }
+
+    fileInputEl.addEventListener("change", handleFileChange);
     runButtonEl.addEventListener("click", handleRun);
     downloadButtonEl.addEventListener("click", handleDownload);
   </script>
